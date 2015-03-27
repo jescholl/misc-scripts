@@ -1,0 +1,287 @@
+#!/usr/bin/perl
+
+#####################################################################################################################
+# INI OPTIONS                                                                                                       #
+#####################################################################################################################
+#  All settings are optional, and may only be declared once per section unless otherwise stated.                    #
+#####################################################################################################################
+# [section]     defines a collection of permissions to check, generally related files/directories.                  #
+#   user        username for all modifications within section.  If 'user' is set, 'group' must be set as well.      #
+#   group       groupname for all modifications within section.  If 'group' is set, 'user' must be set as well.     #
+#                                                                                                                   #
+#   dirmode     dir mode for all directories within section.                                                        #
+#   filemode    file mode for all files within section.                                                             #
+#                                                                                                                   #
+#   file        file path to check.  MAY OCCUR MULTIPLE TIMES PER SECTION                                           #
+#   dir         directory path to check.  MAY OCCUR MULTIPLE TIMES PER SECTION                                      #
+#   dirtree     directory path to check recursively.  MAY OCCUR MULTIPLE TIMES PER SECTION                          #
+#                                                                                                                   #
+#   dirregex    a regular expression that each directory is checked against before its permissions are modified.    #
+#   fileregex   a regular expression that each file is checked against before its permissions are modified.         #
+#                                                                                                                   #
+#   maxdepth    maximum depth to search when checking recursively.                                                  #
+#####################################################################################################################
+
+
+
+
+# IDEAS
+##############
+#
+# allow selective chown and chmod so that you can opt to only chmod a section, or only chown it, also maybe chgrp and chown without group
+#   build chown string in validating section, then just call chown on the string
+#
+# some method of specifying specific files or directories without any searching
+#   perhaps a seperate section, a flag to disable recursion gets cumbersome
+#
+# add arguments to specify ini file and possibly more settings on command line
+
+use File::Find;
+#use Config::IniFiles;
+
+use constant DEBUG => 1;
+
+
+# Default ini file location
+$inifile = "/etc/fixperms.ini";
+
+# Override default ini file location with -i switch
+if (shift eq "-i"){
+  $inifile = shift;
+}
+
+
+use constant {
+  TYPEMASK => 0170000,
+  FILEMASK => 0100000,
+  DIRMASK  => 0040000,
+  PERMMASK => 0007777,
+};
+
+die "Unable to read ini file: $inifile\n" unless (-r $inifile);
+
+open INI, "< $inifile" or die "Unable to read ini file: $!\n";
+$ini_str .= $_ while (<INI>);
+close INI;
+
+$cfg = &decodeINI($ini_str);
+
+
+
+sub wanted {
+  # I opted to duplicate the dirregex and fileregex code here so that I could exclude files with binary math first, then move on to regex
+  (! -l) &&
+  (not defined $cfg->{$section}{'maxdepth'} || $cfg->{$section}{'maxdepth'} >= $File::Find::dir =~ tr#/##) &&
+#  print("$_\n"),
+  (($dev,$ino,$mode,$nlink,$uid,$gid) = stat($_)) && (
+    #Directories
+    ((($mode & TYPEMASK) ==  DIRMASK) &&
+      (
+        (defined $set_dmode && (($mode & PERMMASK) != $set_dmode)) &&
+        ($cfg->{$section}{'dirregex'} eq "" || $File::Find::dir =~ m/$cfg->{$section}{'dirregex'}/) &&
+        (DEBUG && printf("    chmod %o $_\n", $set_dmode), 1) &&
+        chmod($set_dmode, $_),
+
+        (defined $set_uid && defined $set_gid && ($uid ne $set_uid || $gid ne $set_gid)) &&
+        ($cfg->{$section}{'dirregex'} eq "" || $File::Find::dir =~ m/$cfg->{$section}{'dirregex'}/) &&
+        (DEBUG && print("    chown $set_uid.$set_gid $_ \n"), 1) &&
+        chown($set_uid, $set_gid, $_),
+        1
+      )
+    ) ||
+    #Files
+    ((($mode & TYPEMASK) == FILEMASK) &&
+      (
+        (defined $set_fmode && (($mode & PERMMASK) != $set_fmode)) &&
+        ($cfg->{$section}{'fileregex'} eq "" || $File::Find::dir =~ m/$cfg->{$section}{'fileregex'}/) &&
+        (DEBUG && printf("    chmod %o $_\n", $set_fmode), 1) &&
+        chmod($set_fmode, $_),
+
+        (defined $set_uid && defined $set_gid && ($uid ne $set_uid || $gid ne $set_gid)) &&
+        ($cfg->{$section}{'fileregex'} eq "" || $File::Find::dir =~ m/$cfg->{$section}{'fileregex'}/) &&
+        (DEBUG && print("    chown2 $set_uid.$set_gid $_\n"), 1) &&
+        chown($set_uid, $set_gid, $_),
+        1
+      )
+    )
+  );
+}
+
+
+sub decodeINI {
+  my $initext = shift;
+  use vars qw(%readini_inihash);
+  my $section;
+
+  open READINI, "< ", \$initext or die "Cannot read INI string: $!\n";
+
+  while (<READINI>) {
+    next if (/^\s*[;#]/);
+    if (/^\s*\[(.+)\]\s*$/) {
+      $section = $1;
+    }
+    elsif (/^\s*([^=]+)=(.*)$/) {
+      my ($property, $value) = (lc($1),$2);
+      if (exists $readini_inihash{$section}{$property}) {
+        if (ref $readini_inihash{$section}{$property} ne 'ARRAY') {
+          $readini_inihash{$section}{$property} = [$readini_inihash{$section}{$property}];
+        }
+        push @{$readini_inihash{$section}{$property}}, $value;
+      }
+      else {
+        $readini_inihash{$section}{$property} = $value;
+      }
+    }
+  }
+  return \%readini_inihash;
+}
+
+
+
+
+# Validate config
+
+SECTION: foreach $section (keys %$cfg) {
+  my @search_directories, @directories, @files;
+  my @valid_search_directories;
+
+  foreach $setting (keys %{$cfg->{$section}}) {
+    if (ref $cfg->{$section}{$setting} eq 'ARRAY' and not ($setting eq 'dirtree' or $setting eq 'dir' or $setting eq 'file')) {
+      print "SKIPPING SECTION '$section': '$setting' may only be defined once.\n";
+      next SECTION;
+    }
+  }
+
+  if (defined $cfg->{$section}{'user'}) {
+    $valid{$section}{'uid'} = getpwnam($cfg->{$section}{'user'});
+    print("SKIPPING SECTION '$section': $cfg->{$section}{'user'} is not a valid user.\n"),             next SECTION if ($valid{$section}{'uid'} eq "");
+  }
+  if (defined $cfg->{$section}{'group'}) {
+    $valid{$section}{'gid'} = getgrnam($cfg->{$section}{'group'});
+    print("SKIPPING SECTION '$section': $cfg->{$section}{'group'} is not a valid group.\n"),           next SECTION if ($valid{$section}{'gid'} eq "");
+  }
+  if (defined $cfg->{$section}{'filemode'}) {
+    $valid{$section}{'fmode'} = oct($cfg->{$section}{'filemode'});
+    print("SKIPPING SECTION '$section': $cfg->{$section}{'filemode'} is not a valid mode string.\n"),  next SECTION if (($valid{$section}{'fmode'} & PERMMASK) != $valid{$section}{'fmode'});
+  }
+  if (defined $cfg->{$section}{'dirmode'}) {
+    $valid{$section}{'dmode'} = oct($cfg->{$section}{'dirmode'});
+    print("SKIPPING SECTION '$section': $cfg->{$section}{'dirmode'} is not a valid mode string.\n"),   next SECTION if (($valid{$section}{'dmode'} & PERMMASK) != $valid{$section}{'dmode'});
+  }
+
+#
+# Sections without one of these options end up with an array with 1 element who's value is "" that must then be checked later, this isn't ideal but find chokes if it gets fed an empty array.
+#
+
+  if (ref $cfg->{$section}{'dirtree'} eq 'ARRAY') { @search_directories = @{$cfg->{$section}{'dirtree'}}   } else { @search_directories = ($cfg->{$section}{'dirtree'}) }
+  if (ref $cfg->{$section}{'dir'}     eq 'ARRAY') { @directories        = @{$cfg->{$section}{'dir'}}       } else { @directories        = ($cfg->{$section}{'dir'})     }
+  if (ref $cfg->{$section}{'file'}    eq 'ARRAY') { @files              = @{$cfg->{$section}{'file'}}      } else { @files              = ($cfg->{$section}{'file'})    }
+
+
+#  foreach $directory (@search_directories) {
+#    print "Validating dirtree $directory\n" if DEBUG;
+#    if (-d $directory) {
+#      push @{$valid{$section}{'dirtree'}}, $directory;
+##      push @valid_search_directories, $directory;
+#    }
+#    else {
+#      @dirglob = glob($directory);
+#      if ($#dirglob) {
+#        push @search_directories, @dirglob;
+#        next;
+#      }
+#      elsif (-d $dirglob[0]) { #if the glob returns one result that is different than the glob string itself (i.e. /usr/lo?al/bin
+#        push @{$valid{$section}{'dirtree'}}, $dirglob[0];
+##        push @valid_search_directories, $dirglob[0];
+#      }
+#      elsif (DEBUG) {
+#        print("SKIPPING searchdirdir '$directory': not a directory.\n");
+#      }
+#    }
+#  }
+
+  foreach (@search_directories) {
+    if (-d) {
+      push @{$valid{$section}{'dirtree'}}, $_;
+      push @{$dupcheck{'dirtree'}{$_}}, $section;
+    }
+    elsif (/[\*\?]|(\[.*\])/) {
+      push @search_directories, glob($_);
+    }
+  }
+
+  foreach (@directories) {
+    if (-d) {
+      push @{$valid{$section}{'dirs'}}, $_;
+      push @{$dupcheck{'dirs'}{$_}},  $section;
+    }
+    elsif (/[\*\?]|(\[.*\])/) {
+      push @directories, glob($_);
+    }
+  }
+
+  foreach (@files) {
+    if (-f) {
+      push @{$valid{$section}{'files'}}, $_;
+      push @{$dupcheck{'files'}{$_}}, $section;
+    }
+    elsif (/[\*\?]|(\[.*\])/) {
+      push @files, glob($_);
+    }
+  }
+}
+#print "\nDUPCHECK CONTAINS...\n";
+#print "dirtree: $_: @{$dupcheck{'dirtree'}{$_}}\n" foreach (keys %{$dupcheck{'dirtree'}});
+#print "dirs   : $_: @{$dupcheck{'dirs'}{$_}}\n" foreach (keys %{$dupcheck{'dirs'}});
+#print "files  : $_: @{$dupcheck{'files'}{$_}}\n" foreach (keys %{$dupcheck{'files'}});
+
+print "\n\nChecking Duplicates\n----------------------\n" if DEBUG;
+foreach $dirtree (keys %{$dupcheck{'dirtree'}}) {
+  push @{$duplist{$dirtree}}, @{$dupcheck{'dirtree'}{$dirtree}}  if ($#{$dupcheck{'dirtree'}{$dirtree}} > 0);
+
+  foreach $dir (keys %{$dupcheck{'dirs'}}) {
+    push @{$duplist{$dirtree}}, @{$dupcheck{'dirs'}{$dir}} if ($#{$dupcheck{'dirs'}{$dir}} > 0 || $dir =~ /^$dirtree/);
+    push @{$duplist{$dirtree}}, @{$dupcheck{'dirtree'}{$dirtree}} if ($dir =~ /^$dirtree/);
+    #check this
+  }
+  foreach $file (keys %{$dupcheck{'files'}}) {
+    push @{$duplist{$dirtree}}, @{$dupcheck{'files'}{$file}} if ($#{$dupcheck{'files'}{$file}} > 0 || $file =~ /^$dirtree/);
+    push @{$duplist{$dirtree}}, @{$dupcheck{'dirtree'}{$dirtree}} if ($file =~ /^$dirtree/);
+  }
+  foreach $dup (keys %duplist) {
+    $diemsg .=  "\nDuplicate settings for '$dup' found in the following sections:\n";
+    $diemsg .= "  $_ ($dup)\n" foreach (@{$duplist{$dup}});
+  }
+  die $diemsg if $diemsg;
+}
+
+print "\n\nValidation Complete\n----------------------\n" if DEBUG;
+foreach $section (keys %valid) {
+  ($set_dmode, $set_fmode, $set_uid, $set_gid) = ($valid{$section}{'dmode'}, $valid{$section}{'fmode'}, $valid{$section}{'uid'}, $valid{$section}{'gid'});
+  print "\nSECTION: $section\n" if DEBUG;
+
+  print "  Processing single dirs\n" if DEBUG;
+  foreach (@{$valid{$section}{'dirs'}}) {
+    (chmod ($set_dmode, $_), print "    chmod $set_dmode $_\n") if defined $set_dmode;
+    (chown ($set_uid, $set_gid, $_), print "    chown $set_uid.$set_gid $_\n") if defined $set_uid and defined $set_gid;
+  }
+
+  print "  Processing single files\n" if DEBUG;
+  foreach (@{$valid{$section}{'files'}}) {
+    if (defined $set_fmode) {
+      chmod $set_fmode, $_;
+      print "    chmod $set_fmode $_\n";
+#      (chmod ($set_fmode, $_), print "    chmod $set_fmode $_\n") if defined $set_fmode;
+    }
+    if (defined $set_uid and defined $set_gid) {
+      chown $set_uid, $set_gid, $_;
+      print "    chown $set_uid.$set_gid $_\n";
+#      (chown ($set_uid, $set_gid, $_), print "    chown $set_uid.$set_gid $_\n") if defined $set_uid and defined $set_gid;
+    }
+  }
+
+  print "  Processing directory trees\n" if DEBUG;
+  if (@{$valid{$section}{'dirtree'}}) {
+    find({ wanted=>\&wanted, no_chdir=>1 }, @{$valid{$section}{'dirtree'}});
+  }
+}

@@ -1,0 +1,72 @@
+#! /usr/bin/env ruby
+
+require 'socket'
+require 'optparse'
+
+$chunksize = 1000
+
+def udp_receive(address,port)
+  socket = UDPSocket.new
+  socket.bind(address, port)
+  while chunk = socket.recvfrom($chunksize)
+    puts chunk.inspect
+    break if chunk.length < $chunksize
+    break if chunk =~ /\0$/
+  end
+end
+
+def udp_send(address,port)
+  socket = UDPSocket.new
+  socket.connect(address,port)
+  while (chunk = STDIN.read($chunksize))
+    socket.send chunk, 0
+    break if chunk.length < $chunksize
+    break if chunk =~ /\0$/
+  end
+end
+
+def tcp_receive()
+puts "tcp_receive"
+  puts "not supported yet"
+end
+
+def tcp_send()
+puts "tcp_send"
+  puts "not supported yet"
+end
+
+options = {}
+opts_parser = OptionParser.new do |opts|
+  opts.banner = "Usage: jnc [-l] [-u] hostname port"
+
+  opts.on('-l', '--listen', 'Listen') { options[:listen] = true }
+  opts.on('-u', '--udp', 'UDP') { options[:udp] = true }
+#  opts.on('-h', '--host HOST', 'Hostname') { |v| options[:hostname] = v }
+#  opts.on('-p', '--port PORT', 'Port') { |v| options[:port] = v }
+  opts.on('--help', 'Show this message') { puts opts_parser; exit }
+
+end
+opts_parser.parse!
+
+options[:hostname] = ARGV[0] if ARGV[0] =~ /^[0-9\.a-zA-Z\-_]+$/
+options[:port] = ARGV[1] if ARGV[1] =~ /^[0-9]+$/
+
+if options[:hostname].nil? || options[:port].nil?
+  puts opts_parser
+  exit
+end
+
+if options[:listen]
+  if options[:udp]
+    udp_receive(options[:address],options[:port])
+  else
+    tcp_receive(options[:address],options[:port])
+  end
+else
+  if options[:udp]
+    udp_send(options[:address],options[:port])
+  else
+    tcp_send(options[:address],options[:port])
+  end
+end
+
