@@ -1,0 +1,163 @@
+#!/bin/bash
+#
+# /etc/init.d/UniFi -- startup script for Ubiquiti UniFi
+#
+#
+### BEGIN INIT INFO
+# Provides:          unifi
+# Required-Start:    $local_fs $remote_fs $network
+# Required-Stop:     $local_fs $remote_fs $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Ubiquiti UniFi
+# Description:       Ubiquiti UniFi Controller
+### END INIT INFO
+
+set_java_home () {
+        arch=`dpkg --print-architecture 2>/dev/null`
+        support_java_ver='6 7'
+        java_list=''
+        for v in ${support_java_ver}; do
+                java_list=`echo ${java_list} java-$v-openjdk-${arch}`
+                java_list=`echo ${java_list} java-$v-openjdk`
+        done
+
+        cur_java=`update-alternatives --query java | awk '/^Value: /{print $2}'`
+        cur_real_java=`readlink -f ${cur_java} 2>/dev/null`
+        for jvm in ${java_list}; do
+                jvm_real_java=`readlink -f /usr/lib/jvm/${jvm}/bin/java 2>/dev/null`
+                [ "${jvm_real_java}" != "" ] || continue
+                if [ "${jvm_real_java}" == "${cur_real_java}" ]; then
+                        JAVA_HOME="/usr/lib/jvm/${jvm}"
+                        return
+                fi
+        done
+
+        alts_java=`update-alternatives --query java | awk '/^Alternative: /{print $2}'`
+        for cur_java in ${alts_java}; do
+                cur_real_java=`readlink -f ${cur_java} 2>/dev/null`
+                for jvm in ${java_list}; do
+                        jvm_real_java=`readlink -f /usr/lib/jvm/${jvm}/bin/java 2>/dev/null`
+                        [ "${jvm_real_java}" != "" ] || continue
+                        if [ "${jvm_real_java}" == "${cur_real_java}" ]; then
+                                JAVA_HOME="/usr/lib/jvm/${jvm}"
+                                return
+                        fi
+                done
+        done
+
+        JAVA_HOME=/usr/lib/jvm/java-6-openjdk
+}
+
+NAME="unifi"
+DESC="Ubiquiti UniFi Controller"
+
+BASEDIR="/opt/UniFi"
+MAINCLASS="com.ubnt.ace.Launcher"
+
+PIDFILE="/var/run/${NAME}/${NAME}.pid"
+PATH=/bin:/usr/bin:/sbin:/usr/sbin
+
+#MONGOPORT=27117
+#MONGOLOCK="${BASEDIR}/data/db/mongod.lock"
+
+ENABLE_UNIFI=yes
+JVM_EXTRA_OPTS=
+JSVC_EXTRA_OPTS=
+[ -f /etc/default/${NAME} ] && . /etc/default/${NAME}
+
+[ "x${ENABLE_UNIFI}" != "xyes" ] && exit 0
+
+JVM_OPTS="${JVM_EXTRA_OPTS} -Djava.awt.headless=true -Dfile.encoding=UTF-8 -Xmx1024M"
+
+set_java_home
+
+# JSVC - for running java apps as services
+JSVC=`which jsvc`
+
+#JSVC_OPTS="-debug"
+JSVC_OPTS="${JSVC_OPTS}\
+ -home ${JAVA_HOME} \
+ -cp /usr/share/java/commons-daemon.jar:${BASEDIR}/lib/ace.jar \
+ -pidfile ${PIDFILE} \
+ -procname ${NAME} \
+ -outfile SYSLOG \
+ -errfile SYSLOG \
+ ${JSVC_EXTRA_OPTS} \
+ ${JVM_OPTS}"
+
+[ -f /etc/default/rcS ] && . /etc/default/rcS
+. /lib/lsb/init-functions
+
+[ -d /var/run/${NAME} ] || mkdir -p /var/run/${NAME}
+cd ${BASEDIR}
+
+is_not_running() {
+        start-stop-daemon --test --start --pidfile "${PIDFILE}" \
+                --startas "${JAVA_HOME}/bin/java" >/dev/null
+        RC=$?
+        return ${RC}
+}
+
+case "$1" in
+        start)
+                log_daemon_msg "Starting ${DESC}" "${NAME}"
+                if is_not_running; then
+echo " ${JSVC} ${JSVC_OPTS} ${MAINCLASS} start" 
+                        ${JSVC} ${JSVC_OPTS} ${MAINCLASS} start
+                        sleep 1
+                        if is_not_running; then
+                                log_end_msg 1
+                        else
+                                log_end_msg 0
+                        fi
+                else
+                        log_progress_msg "(already running)"
+                        log_end_msg 1
+                fi
+        ;;
+        stop)
+                log_daemon_msg "Stopping ${DESC}" "${NAME}"
+                if is_not_running; then
+                        log_progress_msg "(not running)"
+                else
+                        ${JSVC} ${JSVC_OPTS} -stop ${MAINCLASS} stop
+                        for i in `seq 1 10` ; do
+                                [ -z "$(pgrep -f ${BASEDIR}/lib/ace.jar)" ] && break
+                                # graceful shutdown
+                                [ $i -gt 1 ] && [ -d ${BASEDIR}/run ] && touch ${BASEDIR}/run/server.stop || true
+                                # savage shutdown
+                                [ $i -gt 7 ] && pkill -f ${BASEDIR}/lib/ace.jar || true
+                                sleep 1
+                        done
+                        # shutdown mongod
+                        #if [ -f ${MONGOLOCK} ]; then
+                        #        mongo localhost:${MONGOPORT} --eval "db.getSiblingDB('admin').shutdownServer()" >/dev/null 2>&1
+                        #fi
+                fi
+                log_end_msg 0
+        ;;
+        status)
+                status_of_proc -p ${PIDFILE} unifi unifi && exit 0 || exit $?
+        ;;
+        restart|reload|force-reload)
+                if ! is_not_running ; then
+                        if which invoke-rc.d >/dev/null 2>&1; then
+                                invoke-rc.d ${NAME} stop
+                        else
+                                /etc/init.d/${NAME} stop
+                        fi
+                fi
+                if which invoke-rc.d >/dev/null 2>&1; then
+                        invoke-rc.d ${NAME} start
+                else
+                        /etc/init.d/${NAME} start
+                fi
+        ;;
+        *)
+                log_success_msg "Usage: $0 {start|stop|restart|reload|force-reload}"
+                exit 1
+        ;;
+esac
+
+exit 0

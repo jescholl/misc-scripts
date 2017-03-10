@@ -1,0 +1,54 @@
+#!/bin/sh
+
+# username defaults to current user
+username=$USER
+
+
+show_help() {
+echo <<EOT
+Usage: $0 --github ... [options] LOGIN
+
+Any option accepted by useradd is accepted by $0
+
+Options:
+  --github USER        Github username to pull public keys from [REQUIRED]
+EOT
+}
+
+
+while [[ $# -gt 1 ]]; do
+  key="$1"
+
+  case $key in
+    --github)
+      github_user="$2"
+      shift # past argument
+      ;;
+    *)
+      args="$args $1"
+      ;;
+  esac
+  shift # past argument or value
+done
+
+user=$1
+args="$args $user"
+
+echo user = $user
+echo github_user = $github_user
+echo args = $args
+exit 0
+
+ssh_keys=$(curl -sSL https://github.com/$github_user.keys)
+home_dir=$(eval echo "~$username")
+
+echo creating directory $home_dir/.ssh
+mkdir -p $home_dir/.ssh
+
+echo getting keys for $github_user
+echo writing keys to $home_dir/.ssh/authorized_keys
+echo $ssh_keys > $home_dir/.ssh/authorized_keys
+
+echo setting permissions 
+chown -R $username.$groupname $home_dir $home_dir/.ssh
+chmod -R 0700 $home_dir/.ssh

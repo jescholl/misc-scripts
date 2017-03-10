@@ -14,7 +14,6 @@
 #   http://jontai.me/blog/2011/11/monitoring-dns-queries-with-tcpdump/
 #
 
-require 'date'
 require 'optparse'
 $options = {}
 opt_parser = OptionParser.new do |opt|
