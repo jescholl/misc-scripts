@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# This a wrapper for useradd, but adds the '--github' option,
+# which allows you to pull public keys from github and put them
+# in authorized_keys
+
 # username defaults to current user
 username=$USER
 

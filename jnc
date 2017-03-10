@@ -1,5 +1,8 @@
 #! /usr/bin/env ruby
 
+# This is a simple port of netcat into ruby
+
+
 require 'socket'
 require 'optparse'
 
